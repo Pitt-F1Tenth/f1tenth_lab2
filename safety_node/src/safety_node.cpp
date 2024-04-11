@@ -5,7 +5,7 @@
 #include "ackermann_msgs/msg/ackermann_drive_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
-#include "std_msgs/msg/float32_multi_array.hpp"
+#include "std_msgs/msg/float32.hpp"
 
 class Safety : public rclcpp::Node {
     // The class that handles emergency braking
@@ -21,42 +21,69 @@ class Safety : public rclcpp::Node {
             "/scan", 1,
             std::bind(&Safety::scanCB, this, std::placeholders::_1));
 
+        teleop_sub_ = this->create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
+            "/teleop", 1,
+            std::bind(&Safety::teleopCB, this, std::placeholders::_1));
+
         // Publishers
         drive_pub_ =
             this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
                 "/drive", 1);
         ttc_pub_ =
-            this->create_publisher<std_msgs::msg::Float32MultiArray>("/ttc", 1);
+        this->create_publisher<std_msgs::msg::Float32>("/ttc", 1);
 
-        this->declare_parameter("fov", 50);
+        this->declare_parameter("fov", 30);
         fov_ = this->get_parameter("fov").as_int();
         fov_ *= M_PI / 180.;
 
-        this->declare_parameter("ttc_thresh", -1.2);
+        this->declare_parameter("ttc_thresh", -0.8);
         ttc_threshold_ = this->get_parameter("ttc_thresh").as_double();
+
+        this->declare_parameter("brake", false);
+        emergency_brake_override_ = this->get_parameter("brake").as_bool();
+
+	// Timer
+	param_timer_ = this->create_wall_timer(std::chrono::milliseconds(100),
+			std::bind(&Safety::Timer, this));
     }
+
+    void Timer() {
+        fov_ = this->get_parameter("fov").as_int();
+	fov_ *= M_PI / 180.;
+        ttc_threshold_ = this->get_parameter("ttc_thresh").as_double();
+        emergency_brake_override_ = this->get_parameter("brake").as_bool();
+    }	
 
    private:
     double current_speed_ = 0.0;
     double current_heading_ = 0.0;
     double fov_;
     double ttc_threshold_;
+    bool emergency_brake_override_ = false;
+    ackermann_msgs::msg::AckermannDriveStamped teleop_cmd_;
 
     // ROS
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+    rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr teleop_sub_;
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
         drive_pub_;
-    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr ttc_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr ttc_pub_;
+    rclcpp::TimerBase::SharedPtr param_timer_;
 
     void odomCB(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
         current_speed_ = msg->twist.twist.linear.x;
         current_heading_ = msg->twist.twist.angular.z;
     }
 
-    void scanCB(const sensor_msgs::msg::LaserScan::ConstSharedPtr scan_msg) {
-        //! Find angular span of scan
+    void teleopCB(const ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr msg) {
+        teleop_cmd_ = *msg;
+        current_speed_ = msg->drive.speed;
+    }
+
+    void scanCB(const sensor_msgs::msg::LaserScan::ConstSharedPtr scan_msg) {	
+	//! Find angular span of scan
         auto min_angle = scan_msg->angle_min;
         auto max_angle = scan_msg->angle_max;
         auto increment = scan_msg->angle_increment;
@@ -102,26 +129,28 @@ class Safety : public rclcpp::Node {
         }
 
         // Evaluate TTC
-        std_msgs::msg::Float32MultiArray ttc_msg;
-        std::vector<double> ttcs;
+        std_msgs::msg::Float32 ttc_msg;
+        ttc_msg.data = -1;
         bool emergency_brake = false;
         for (std::size_t i = 0; i < scans.size(); ++i) {
             double ttc = scans[i] / -r_dot[i];
-            ttcs.push_back(ttc);
-            ttc_msg.data.push_back(ttc);
+            // ttc_msg.data.push_back(ttc);
             if (ttc > ttc_threshold_ && ttc < 0.) {
+                ttc_msg.data = ttc;
                 emergency_brake = true;
                 break;
             }
         }
 
-        if (emergency_brake) {
+        if (emergency_brake_override_ || emergency_brake) {
             RCLCPP_WARN(this->get_logger(), "EMERGENCY BRAKE ENGAGED");
-            ackermann_msgs::msg::AckermannDriveStamped msg;
+            ackermann_msgs::msg::AckermannDriveStamped msg = teleop_cmd_;
             msg.drive.speed = 0.;
             msg.drive.acceleration = 0.;
             msg.drive.jerk = 0.;
             drive_pub_->publish(msg);
+        } else {
+            drive_pub_->publish(teleop_cmd_);
         }
         ttc_pub_->publish(ttc_msg);
     }
@@ -132,3 +161,4 @@ int main(int argc, char **argv) {
     rclcpp::shutdown();
     return 0;
 }
+
