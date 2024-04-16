@@ -6,6 +6,7 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/float32.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 class Safety : public rclcpp::Node {
     // The class that handles emergency braking
@@ -16,19 +17,23 @@ class Safety : public rclcpp::Node {
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             "/ego_racecar/odom", 1,
             std::bind(&Safety::odomCB, this, std::placeholders::_1));
-
         scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
             "/scan", 1,
             std::bind(&Safety::scanCB, this, std::placeholders::_1));
-
+        drive_sub_ = this->create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
+            "/drive", 1,
+            std::bind(&Safety::driveCB, this, std::placeholders::_1));
         teleop_sub_ = this->create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
             "/teleop", 1,
             std::bind(&Safety::teleopCB, this, std::placeholders::_1));
+        autonomy_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+            "/enable_autonomous", 1,
+            std::bind(&Safety::autonomyCB, this, std::placeholders::_1));
 
         // Publishers
-        drive_pub_ =
+        safe_drive_pub_ =
             this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
-                "/drive", 1);
+                "/safe_drive", 1);
         ttc_pub_ =
         this->create_publisher<std_msgs::msg::Float32>("/ttc", 1);
 
@@ -60,15 +65,19 @@ class Safety : public rclcpp::Node {
     double fov_;
     double ttc_threshold_;
     bool emergency_brake_override_ = false;
+    bool autonomy_enabled_ = false;
     ackermann_msgs::msg::AckermannDriveStamped teleop_cmd_;
+    ackermann_msgs::msg::AckermannDriveStamped drive_cmd_;
 
     // ROS
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr teleop_sub_;
+    rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr autonomy_sub_;
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
-        drive_pub_;
+        safe_drive_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr ttc_pub_;
     rclcpp::TimerBase::SharedPtr param_timer_;
 
@@ -80,6 +89,14 @@ class Safety : public rclcpp::Node {
     void teleopCB(const ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr msg) {
         teleop_cmd_ = *msg;
         current_speed_ = msg->drive.speed;
+    }
+
+    void driveCB(const ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr msg) {
+        drive_cmd_ = *msg;
+    }
+
+    void autonomyCB(const std_msgs::msg::Bool::ConstSharedPtr msg) {
+        autonomy_enabled_ = msg->data;
     }
 
     void scanCB(const sensor_msgs::msg::LaserScan::ConstSharedPtr scan_msg) {	
@@ -148,9 +165,11 @@ class Safety : public rclcpp::Node {
             msg.drive.speed = 0.;
             msg.drive.acceleration = 0.;
             msg.drive.jerk = 0.;
-            drive_pub_->publish(msg);
+            safe_drive_pub_->publish(msg);
+        } else if (autonomy_enabled_) {
+            safe_drive_pub_->publish(drive_cmd_);
         } else {
-            drive_pub_->publish(teleop_cmd_);
+            safe_drive_pub_->publish(teleop_cmd_);
         }
         ttc_pub_->publish(ttc_msg);
     }
