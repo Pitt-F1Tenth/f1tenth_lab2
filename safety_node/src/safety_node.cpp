@@ -6,7 +6,8 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/float32.hpp"
-#include "std_msgs/msg/bool.hpp"
+// #include "std_msgs/msg/int8.hpp"
+#include "sensor_msgs/msg/joy.hpp"
 
 class Safety : public rclcpp::Node {
     // The class that handles emergency braking
@@ -26,8 +27,8 @@ class Safety : public rclcpp::Node {
         teleop_sub_ = this->create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
             "/teleop", 1,
             std::bind(&Safety::teleopCB, this, std::placeholders::_1));
-        autonomy_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-            "/enable_autonomous", 1,
+        autonomy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
+            "/joy", 1,
             std::bind(&Safety::autonomyCB, this, std::placeholders::_1));
 
         // Publishers
@@ -41,7 +42,7 @@ class Safety : public rclcpp::Node {
         fov_ = this->get_parameter("fov").as_int();
         fov_ *= M_PI / 180.;
 
-        this->declare_parameter("ttc_thresh", -0.8);
+        this->declare_parameter("ttc_thresh", -0.6);
         ttc_threshold_ = this->get_parameter("ttc_thresh").as_double();
 
         this->declare_parameter("brake", false);
@@ -74,7 +75,7 @@ class Safety : public rclcpp::Node {
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr teleop_sub_;
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_sub_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr autonomy_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr autonomy_sub_;
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
         safe_drive_pub_;
@@ -91,16 +92,19 @@ class Safety : public rclcpp::Node {
         current_speed_ = msg->drive.speed;
     }
 
-    void driveCB(const ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr msg) {
-        drive_cmd_ = *msg;
+    void autonomyCB(const sensor_msgs::msg::Joy::ConstSharedPtr msg) {
+        autonomy_enabled_ = msg->buttons[3];
     }
 
-    void autonomyCB(const std_msgs::msg::Bool::ConstSharedPtr msg) {
-        autonomy_enabled_ = msg->data;
+    void driveCB(const ackermann_msgs::msg::AckermannDriveStamped::ConstSharedPtr msg) {
+        drive_cmd_ = *msg;
+        if (autonomy_enabled_) {
+            current_speed_ = msg->drive.speed;
+        }
     }
 
     void scanCB(const sensor_msgs::msg::LaserScan::ConstSharedPtr scan_msg) {	
-	//! Find angular span of scan
+	    //! Find angular span of scan
         auto min_angle = scan_msg->angle_min;
         auto max_angle = scan_msg->angle_max;
         auto increment = scan_msg->angle_increment;
